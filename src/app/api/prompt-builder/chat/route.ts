@@ -106,17 +106,19 @@ export async function POST(request: NextRequest) {
   const body: RequestBody = await request.json();
   const { messages, currentState, availableTags, availableCategories } = body;
 
-  // Create a streaming response using TransformStream for better Node.js compatibility
+  // Create a streaming response using ReadableStream for Node.js compatibility
   const encoder = new TextEncoder();
-  const { readable, writable } = new TransformStream();
-  const writer = writable.getWriter();
   
-  const send = async (data: object) => {
-    await writer.write(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-  };
+  const stream = new ReadableStream({
+    async start(controller) {
+      const send = async (data: object) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      };
 
-  // Start processing in background
-  (async () => {
+      const closeStream = () => {
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      };
 
     try {
       const openai = new OpenAI({
@@ -258,8 +260,7 @@ CRITICAL: When editing content, you MUST preserve the FULL content above. Do NOT
         if (toolCalls.length === 0) {
           await send({ type: "state", state });
           await send({ type: "done" });
-          await writer.write(encoder.encode("data: [DONE]\n\n"));
-          await writer.close();
+          closeStream();
           return;
         }
 
@@ -328,16 +329,16 @@ CRITICAL: When editing content, you MUST preserve the FULL content above. Do NOT
       await send({ type: "text", content: "I've made several changes. Let me know if you need anything else!" });
       await send({ type: "state", state });
       await send({ type: "done" });
-      await writer.write(encoder.encode("data: [DONE]\n\n"));
-      await writer.close();
+      closeStream();
     } catch (error) {
       console.error("Prompt builder chat error:", error);
       await send({ type: "error", error: "Failed to process request" });
-      await writer.close();
+      closeStream();
     }
-  })();
+    },
+  });
 
-  return new Response(readable, {
+  return new Response(stream, {
     headers: {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
